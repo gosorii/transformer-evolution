@@ -1,4 +1,5 @@
 import sys
+
 sys.path.append("..")
 import os, argparse, datetime, time, re, collections, random
 from tqdm import tqdm, trange
@@ -16,9 +17,15 @@ import config as cfg
 import model as transformer
 import data
 import optimization as optim
+import pathlib
+import os
+
+REPO_ROOT = os.getenv("REPO_ROOT", pathlib.Path(__file__).resolve().parent.parent)
 
 
 """ random seed """
+
+
 def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -27,19 +34,25 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-""" init_process_group """ 
+""" init_process_group """
+
+
 def init_process_group(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 
 """ destroy_process_group """
+
+
 def destroy_process_group():
     dist.destroy_process_group()
 
 
 """ 모델 epoch 평가 """
+
+
 def eval_epoch(config, rank, model, data_loader):
     matchs = []
     model.eval()
@@ -64,7 +77,11 @@ def eval_epoch(config, rank, model, data_loader):
 
 
 """ 모델 epoch 학습 """
-def train_epoch(config, rank, epoch, model, criterion, optimizer, scheduler, train_loader):
+
+
+def train_epoch(
+    config, rank, epoch, model, criterion, optimizer, scheduler, train_loader
+):
     losses = []
     model.train()
 
@@ -90,11 +107,14 @@ def train_epoch(config, rank, epoch, model, criterion, optimizer, scheduler, tra
 
 
 """ 모델 학습 """
+
+
 def train_model(rank, world_size, args):
     if 1 < args.n_gpu:
         init_process_group(rank, world_size)
-    master = (world_size == 0 or rank % world_size == 0)
-    if master: wandb.init(project="transformer-evolution")
+    master = world_size == 0 or rank % world_size == 0
+    if master:
+        wandb.init(project="transformer-evolution")
 
     vocab = load_vocab(args.vocab)
 
@@ -110,24 +130,49 @@ def train_model(rank, world_size, args):
         print(f"rank: {rank} load state dict from: {args.save}")
     if 1 < args.n_gpu:
         model.to(config.device)
-        model = DistributedDataParallel(model, device_ids=[rank], find_unused_parameters=True)
+        model = DistributedDataParallel(
+            model, device_ids=[rank], find_unused_parameters=True
+        )
     else:
         model.to(config.device)
-    if master: wandb.watch(model)
+    if master:
+        wandb.watch(model)
 
     criterion = torch.nn.CrossEntropyLoss()
 
-    train_loader, train_sampler = data.build_data_loader(vocab, "../data/ratings_train.json", args, shuffle=True)
-    test_loader, _ = data.build_data_loader(vocab, "../data/ratings_test.json", args, shuffle=False)
+    train_loader, train_sampler = data.build_data_loader(
+        vocab, f"{REPO_ROOT}/data/ratings_train.json", args, shuffle=True
+    )
+    test_loader, _ = data.build_data_loader(
+        vocab, f"{REPO_ROOT}/data/ratings_test.json", args, shuffle=False
+    )
 
     t_total = len(train_loader) * args.epoch
-    no_decay = ['bias', 'LayerNorm.weight']
+    no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": 0.0,
+        },
     ]
-    optimizer = optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    scheduler = optim.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
+    optimizer = optim.AdamW(
+        optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
+    )
+    scheduler = optim.get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
+    )
 
     offset = best_epoch
     for step in trange(args.epoch, desc="Epoch"):
@@ -135,9 +180,12 @@ def train_model(rank, world_size, args):
             train_sampler.set_epoch(step)
         epoch = step + offset
 
-        loss = train_epoch(config, rank, epoch, model, criterion, optimizer, scheduler, train_loader)
+        loss = train_epoch(
+            config, rank, epoch, model, criterion, optimizer, scheduler, train_loader
+        )
         score = eval_epoch(config, rank, model, test_loader)
-        if master: wandb.log({"loss": loss, "accuracy": score})
+        if master:
+            wandb.log({"loss": loss, "accuracy": score})
 
         if master and best_score < score:
             best_epoch, best_loss, best_score = epoch, loss, score
@@ -145,36 +193,61 @@ def train_model(rank, world_size, args):
                 model.module.save(best_epoch, best_loss, best_score, args.save)
             else:
                 model.save(best_epoch, best_loss, best_score, args.save)
-            print(f">>>> rank: {rank} save model to {args.save}, epoch={best_epoch}, loss={best_loss:.3f}, socre={best_score:.3f}")
+            print(
+                f">>>> rank: {rank} save model to {args.save}, epoch={best_epoch}, loss={best_loss:.3f}, socre={best_score:.3f}"
+            )
 
     if 1 < args.n_gpu:
         destroy_process_group()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config_half.json", type=str, required=False,
-                        help="config file")
-    parser.add_argument("--vocab", default="../kowiki.model", type=str, required=False,
-                        help="vocab file")
-    parser.add_argument("--save", default="save_best.pth", type=str, required=False,
-                        help="save file")
-    parser.add_argument("--epoch", default=20, type=int, required=False,
-                        help="epoch")
-    parser.add_argument("--batch", default=512, type=int, required=False,
-                        help="batch")
-    parser.add_argument("--gpu", default=None, type=int, required=False,
-                        help="GPU id to use.")
-    parser.add_argument('--seed', type=int, default=42, required=False,
-                        help="random seed for initialization")
-    parser.add_argument('--weight_decay', type=float, default=0, required=False,
-                        help="weight decay")
-    parser.add_argument('--learning_rate', type=float, default=5e-5, required=False,
-                        help="learning rate")
-    parser.add_argument('--adam_epsilon', type=float, default=1e-8, required=False,
-                        help="adam epsilon")
-    parser.add_argument('--warmup_steps', type=float, default=0, required=False,
-                        help="warmup steps")
+    parser.add_argument(
+        "--config",
+        default=f"{REPO_ROOT}/transformer/config_half.json",
+        type=str,
+        required=False,
+        help="config file",
+    )
+    parser.add_argument(
+        "--vocab",
+        default=f"{REPO_ROOT}/kowiki.model",
+        type=str,
+        required=False,
+        help="vocab file",
+    )
+    parser.add_argument(
+        "--save", default="save_best.pth", type=str, required=False, help="save file"
+    )
+    parser.add_argument("--epoch", default=20, type=int, required=False, help="epoch")
+    parser.add_argument("--batch", default=512, type=int, required=False, help="batch")
+    parser.add_argument(
+        "--gpu", default=None, type=int, required=False, help="GPU id to use."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        required=False,
+        help="random seed for initialization",
+    )
+    parser.add_argument(
+        "--weight_decay", type=float, default=0, required=False, help="weight decay"
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-5,
+        required=False,
+        help="learning rate",
+    )
+    parser.add_argument(
+        "--adam_epsilon", type=float, default=1e-8, required=False, help="adam epsilon"
+    )
+    parser.add_argument(
+        "--warmup_steps", type=float, default=0, required=False, help="warmup steps"
+    )
 
     args = parser.parse_args()
 
@@ -185,10 +258,6 @@ if __name__ == '__main__':
     set_seed(args)
 
     if 1 < args.n_gpu:
-        mp.spawn(train_model,
-             args=(args.n_gpu, args),
-             nprocs=args.n_gpu,
-             join=True)
+        mp.spawn(train_model, args=(args.n_gpu, args), nprocs=args.n_gpu, join=True)
     else:
         train_model(0 if args.gpu is None else args.gpu, args.n_gpu, args)
-
